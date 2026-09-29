@@ -27,8 +27,28 @@ metadata:
   name: grigri-example
   namespace: kagent
 spec:
-  description: kagent's BYO example (two writers in parallel)
+  description: grigri example agent
+  systemPrompt: You are the climber. Do the work one pitch at a time.
   # Referenced so the compiler adds OpenAI credentials and egress for it.
+  modelConfig:
+    name: default-model-config
+  tools:
+  # A Shared subagent: compiled into this Agent's config (sub_agents) and run
+  # by the same harness, in the same Actor.
+  - subAgent:
+      name: belayer
+      description: Reviews risky steps and checks the work stays on route.
+      templateRef:
+        name: grigri-belayer
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: grigri-belayer
+  namespace: kagent
+spec:
+  description: Reviews risky steps and checks the work stays on route.
+  systemPrompt: You are the belayer. Answer only with a belay call and a reason.
   modelConfig:
     name: default-model-config
 ---

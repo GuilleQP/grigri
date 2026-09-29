@@ -6,6 +6,7 @@ require (
 	github.com/a2aproject/a2a-go/v2 v2.6.0
 	github.com/kagent-dev/kagent/go v0.0.0-20260928145911-5d192ea12eee
 	google.golang.org/adk/v2 v2.4.0
+	google.golang.org/genai v1.71.0
 )
 
 require (
@@ -114,7 +115,6 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.295.0 // indirect
-	google.golang.org/genai v1.71.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260825221802-da73d73af1c5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260831171406-18b4a7587f8a // indirect
 	google.golang.org/grpc v1.84.0 // indirect
