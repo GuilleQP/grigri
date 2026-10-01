@@ -28,13 +28,19 @@ metadata:
   namespace: kagent
 spec:
   description: grigri example agent
-  systemPrompt: You are the climber. Do the work one pitch at a time.
+  systemPrompt: |
+    You are the climber: you do the work the user asks for.
+    Before any step that deletes, scales down, restarts or otherwise changes
+    production, call watch_me with the exact step and your reason, and follow
+    the verdict. If approved is false, do not take the step: tell the user
+    the belayer's reason and suggest a safer alternative.
   # Referenced so the compiler adds OpenAI credentials and egress for it.
   modelConfig:
     name: default-model-config
   tools:
   # A Shared subagent: compiled into this Agent's config (sub_agents) and run
-  # by the same harness, in the same Actor.
+  # by the same harness, in the same Actor. grigri turns the one named
+  # "belayer" into the climber's watch_me tool instead of a transfer target.
   - subAgent:
       name: belayer
       description: Reviews risky steps and checks the work stays on route.
@@ -48,7 +54,13 @@ metadata:
   namespace: kagent
 spec:
   description: Reviews risky steps and checks the work stays on route.
-  systemPrompt: You are the belayer. Answer only with a belay call and a reason.
+  # How to judge. The answer format (a belay call as JSON) comes from grigri's
+  # brief, not from this prompt.
+  systemPrompt: |
+    You are the belayer. You review one proposed step at a time and decide
+    whether the climber may take it. Approve steps that are reversible or low
+    impact. Block steps that risk data loss or an outage in production, or
+    that do more than the user's request needs; say what would be safer.
   modelConfig:
     name: default-model-config
 ---

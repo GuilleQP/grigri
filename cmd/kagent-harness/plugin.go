@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 
+	"github.com/GuilleQP/grigri/core/belay"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
@@ -35,12 +36,21 @@ func newPlugin(logger *slog.Logger) (*plugin.Plugin, error) {
 			return nil, nil
 		},
 		BeforeToolCallback: func(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-			logger.Info("grigri: tool call", "agent", ctx.AgentName(), "tool", t.Name())
+			logger.Info("grigri: tool call", "agent", ctx.AgentName(), "tool", toolLabel(t))
 			return nil, nil
 		},
 		AfterToolCallback: func(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
-			logger.Info("grigri: tool result", "agent", ctx.AgentName(), "tool", t.Name(), "error", err)
+			logger.Info("grigri: tool result", "agent", ctx.AgentName(), "tool", toolLabel(t), "error", err)
 			return nil, nil
 		},
 	})
+}
+
+// toolLabel names a tool in logs; grigri's belay-call tools get their label
+// ("🧗 WATCH ME") so they stand out from ordinary tools.
+func toolLabel(t tool.Tool) string {
+	if c := belay.Call(t.Name()); c.Known() {
+		return c.Label()
+	}
+	return t.Name()
 }

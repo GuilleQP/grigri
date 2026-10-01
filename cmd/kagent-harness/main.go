@@ -2,12 +2,18 @@
 //
 // Startup mirrors kagent's own Go runtime (go/adk/cmd/main.go at
 // kagent-dev/kagent@5d192ea1, Apache 2.0): kagent's packages turn the compiled
-// AgentConfig into Google ADK agents (model, MCP tools, skills, compaction,
-// sub-agents) and serve them over A2A. grigri adds its rules as an ADK plugin
-// on the runner, so they apply to every agent in the tree.
+// AgentConfig into Google ADK agents (model, MCP tools, skills, compaction)
+// and serve them over A2A. grigri changes two things:
 //
-// Not wired yet, compared with kagent's runtime: memory, telemetry export and
-// Agent Plugins (skills materialized from plugin packages).
+//   - The sub-agent bound as "belayer" is not a transfer target. The climber
+//     (root) calls it through the watch_me tool, in an isolated session, and
+//     gets a validated belay call back (core/belay). Other sub-agents stay
+//     ADK sub-agents, as in kagent.
+//   - An ADK plugin on the runner sees every model and tool call.
+//
+// Not wired yet, compared with kagent's runtime: memory, telemetry export,
+// Agent Plugins (skills materialized from plugin packages) and STS token
+// propagation.
 //
 // Environment, set by kagent's BYO compiler and the Harness:
 //
@@ -27,15 +33,23 @@ import (
 	"time"
 
 	"github.com/kagent-dev/kagent/go/adk/pkg/a2a"
+	kagentagent "github.com/kagent-dev/kagent/go/adk/pkg/agent"
 	"github.com/kagent-dev/kagent/go/adk/pkg/app"
 	"github.com/kagent-dev/kagent/go/adk/pkg/auth"
 	"github.com/kagent-dev/kagent/go/adk/pkg/config"
 	"github.com/kagent-dev/kagent/go/adk/pkg/controllerclient"
-	runnerpkg "github.com/kagent-dev/kagent/go/adk/pkg/runner"
 	"github.com/kagent-dev/kagent/go/adk/pkg/session"
+	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	adksession "google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
+
+// belayerName is the subagent binding name grigri treats as the belayer.
+const belayerName = "belayer"
 
 func main() {
 	logger, err := logging.New(os.Stderr, cmp.Or(env.LogLevel.Get(), env.LogLevel.DefaultValue()))
@@ -96,15 +110,14 @@ func run(logger *slog.Logger) error {
 	}
 
 	ctx := logging.IntoContext(context.Background(), logger)
-	runnerConfig, err := runnerpkg.CreateRunnerConfig(ctx, agentConfig, sessionService, appName, nil, controllerClient)
-	if err != nil {
-		return fmt.Errorf("create ADK runner config: %w", err)
-	}
 	grigriPlugin, err := newPlugin(logger)
 	if err != nil {
 		return fmt.Errorf("create grigri plugin: %w", err)
 	}
-	runnerConfig.PluginConfig.Plugins = append(runnerConfig.PluginConfig.Plugins, grigriPlugin)
+	runnerConfig, err := buildRunnerConfig(ctx, agentConfig, sessionService, appName, grigriPlugin, logger)
+	if err != nil {
+		return fmt.Errorf("create ADK runner config: %w", err)
+	}
 
 	stream := agentConfig.GetStream()
 	executor, err := a2a.NewKAgentExecutor(a2a.KAgentExecutorConfig{
@@ -132,6 +145,65 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("create app: %w", err)
 	}
 	return kagentApp.Run()
+}
+
+// buildRunnerConfig replaces kagent's runner.CreateRunnerConfig: same agent
+// builder and compaction, but the belayer becomes the watch_me tool instead of
+// a transfer target.
+func buildRunnerConfig(ctx context.Context, cfg *adk.AgentConfig, sessions adksession.Service, appName string, grigriPlugin *plugin.Plugin, logger *slog.Logger) (runner.Config, error) {
+	root := *cfg
+	root.SubAgents = nil
+	var belayerConfig *adk.AgentConfig
+	for _, sub := range cfg.SubAgents {
+		if sub.Name == belayerName && belayerConfig == nil {
+			belayerConfig = sub
+			continue
+		}
+		root.SubAgents = append(root.SubAgents, sub)
+	}
+
+	var extraTools []tool.Tool
+	if belayerConfig != nil {
+		belayerAgent, err := kagentagent.CreateGoogleADKAgent(ctx, belayerConfig, belayerConfig.Name, nil)
+		if err != nil {
+			return runner.Config{}, fmt.Errorf("create belayer: %w", err)
+		}
+		b, err := newBelayer(belayerAgent, grigriPlugin, logger)
+		if err != nil {
+			return runner.Config{}, fmt.Errorf("create belay runner: %w", err)
+		}
+		watchMe, err := newWatchMeTool(b)
+		if err != nil {
+			return runner.Config{}, fmt.Errorf("create watch_me tool: %w", err)
+		}
+		extraTools = append(extraTools, watchMe)
+	} else {
+		logger.Warn("no subagent named " + belayerName + "; watch_me is disabled")
+	}
+
+	rootAgent, err := kagentagent.CreateGoogleADKAgent(ctx, &root, agentNameFromAppName(appName), nil, extraTools...)
+	if err != nil {
+		return runner.Config{}, fmt.Errorf("create agent: %w", err)
+	}
+	compaction, err := kagentagent.CompactionConfig(ctx, cfg)
+	if err != nil {
+		return runner.Config{}, fmt.Errorf("configure context compaction: %w", err)
+	}
+	return runner.Config{
+		AppName:        appName,
+		Agent:          rootAgent,
+		SessionService: sessions,
+		PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{grigriPlugin}},
+		Compaction:     compaction,
+	}, nil
+}
+
+// agentNameFromAppName mirrors kagent's runner: the part after __NS__.
+func agentNameFromAppName(appName string) string {
+	if i := strings.LastIndex(appName, "__NS__"); i >= 0 {
+		return appName[i+len("__NS__"):]
+	}
+	return appName
 }
 
 // deriveAppName follows kagent's runtime: namespace__NS__name when both are
