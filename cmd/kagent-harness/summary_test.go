@@ -40,14 +40,6 @@ sub_agents: 1
 	}
 }
 
-func TestPlaceholderNames(t *testing.T) {
-	raw := `{"a":"__KAGENT_ENV[OPENAI_API_KEY]__","b":["__KAGENT_ENV[B_KEY]__","__KAGENT_ENV[OPENAI_API_KEY]__"],"c":"plain"}`
-	got := placeholderNames(raw)
-	if len(got) != 2 || got[0] != "B_KEY" || got[1] != "OPENAI_API_KEY" {
-		t.Errorf("placeholderNames() = %v", got)
-	}
-}
-
 func TestSummarizeNil(t *testing.T) {
 	if got := summarize(nil); got == "" {
 		t.Error("summarize(nil) is empty")

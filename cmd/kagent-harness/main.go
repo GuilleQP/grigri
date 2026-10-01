@@ -1,144 +1,144 @@
 // Command kagent-harness runs grigri as a kagent BYO harness.
 //
-// Adapted from kagent's BYO example (Apache 2.0), go/adk/examples/byo/main.go
-// at kagent-dev/kagent@5d192ea1: same pkg/app and ADK executor wiring.
+// Startup mirrors kagent's own Go runtime (go/adk/cmd/main.go at
+// kagent-dev/kagent@5d192ea1, Apache 2.0): kagent's packages turn the compiled
+// AgentConfig into Google ADK agents (model, MCP tools, skills, compaction,
+// sub-agents) and serve them over A2A. grigri adds its rules as an ADK plugin
+// on the runner, so they apply to every agent in the tree.
 //
-// For now it only reports what kagent hands it. At startup it reads the
-// compiled AgentConfig (KAGENT_CONFIG_JSON) and Agent Card
-// (KAGENT_AGENT_CARD_JSON), and answers (and logs) every message with a
-// summary of the config and the environment variable names. It calls no model.
+// Not wired yet, compared with kagent's runtime: memory, telemetry export and
+// Agent Plugins (skills materialized from plugin packages).
 //
 // Environment, set by kagent's BYO compiler and the Harness:
 //
-//   - KAGENT_CONFIG_JSON: the compiled AgentConfig. Credentials appear as
-//     __KAGENT_ENV[NAME]__ placeholders, not values.
-//   - KAGENT_AGENT_CARD_JSON: the Agent Card kagent advertises.
-//   - KAGENT_API_URL: the kagent API endpoint (TaskStore), required by pkg/app.
+//   - KAGENT_CONFIG_JSON / KAGENT_AGENT_CARD_JSON: the compiled AgentConfig
+//     and Agent Card, written to KAGENT_CONFIG_DIR (default /config).
+//   - KAGENT_API_URL: the kagent API endpoint (TaskStore, sessions).
 //   - KAGENT_PORT: the port to listen on; the Harness sets 80 (kagent#2758).
 package main
 
 import (
-	"encoding/json"
-	"iter"
+	"cmp"
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
-	"sort"
 	"strings"
+	"time"
 
-	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/kagent-dev/kagent/go/adk/pkg/a2a"
 	"github.com/kagent-dev/kagent/go/adk/pkg/app"
-	"github.com/kagent-dev/kagent/go/api/adk"
+	"github.com/kagent-dev/kagent/go/adk/pkg/auth"
+	"github.com/kagent-dev/kagent/go/adk/pkg/config"
+	"github.com/kagent-dev/kagent/go/adk/pkg/controllerclient"
+	runnerpkg "github.com/kagent-dev/kagent/go/adk/pkg/runner"
+	"github.com/kagent-dev/kagent/go/adk/pkg/session"
+	"github.com/kagent-dev/kagent/go/core/pkg/env"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
-	adkagent "google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/runner"
-	"google.golang.org/adk/v2/server/adka2a/v2"
-	adksession "google.golang.org/adk/v2/session"
-	"google.golang.org/genai"
 )
 
 func main() {
-	logger, _ := logging.New(os.Stderr, "info")
+	logger, err := logging.New(os.Stderr, cmp.Or(env.LogLevel.Get(), env.LogLevel.DefaultValue()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid log level: %v\n", err)
+		os.Exit(1)
+	}
 	slog.SetDefault(logger)
 
-	cfg, err := loadAgentConfig()
-	if err != nil {
-		logger.Error("failed to parse KAGENT_CONFIG_JSON", "error", err)
+	if err := run(logger); err != nil {
+		logger.Error("grigri stopped", "error", err)
 		os.Exit(1)
 	}
-	card, err := loadAgentCard()
-	if err != nil {
-		logger.Error("failed to parse KAGENT_AGENT_CARD_JSON", "error", err)
-		os.Exit(1)
+}
+
+func run(logger *slog.Logger) error {
+	kagentAPIURL := env.KagentAPIURL.Get()
+	if kagentAPIURL == "" {
+		return fmt.Errorf("KAGENT_API_URL is required")
 	}
 
-	report := "AgentConfig received by grigri:\n\n" + summarize(cfg) +
-		"\ncredential placeholders: " + strings.Join(placeholderNames(os.Getenv("KAGENT_CONFIG_JSON")), ", ") +
-		"\nenvironment variables: " + strings.Join(envNames(), ", ") + "\n"
+	configDir := cmp.Or(env.KagentConfigDir.Get(), env.KagentConfigDir.DefaultValue())
+	if err := config.MaterializeFromEnv(configDir); err != nil {
+		return fmt.Errorf("materialize agent config in %s: %w", configDir, err)
+	}
+	agentConfig, agentCard, err := config.LoadAgentConfigs(configDir)
+	if err != nil {
+		return fmt.Errorf("load agent config from %s: %w", configDir, err)
+	}
+	// Startup runs while kagent prepares the golden snapshot, so this reaches
+	// the logs only when the binary runs outside kagent.
+	logger.Info("loaded AgentConfig", "summary", summarize(agentConfig))
 
-	reporter, err := adkagent.New(adkagent.Config{
-		Name:        "grigri",
-		Description: "Replies with a summary of the AgentConfig kagent compiled for it",
-		Run: func(ic adkagent.InvocationContext) iter.Seq2[*adksession.Event, error] {
-			return func(yield func(*adksession.Event, error) bool) {
-				// Logged per turn: startup logs happen while kagent prepares the
-				// golden snapshot and never reach an Actor's logs.
-				logger.Info("reporting AgentConfig", "report", report)
-				event := adksession.NewEvent(ic, ic.InvocationID())
-				event.Author = "grigri"
-				event.Content = genai.NewContentFromText(report, genai.RoleModel)
-				yield(event, nil)
-			}
-		},
+	appName := deriveAppName(env.KagentName.Get(), env.KagentNamespace.Get(), agentCard.Name)
+
+	tokenService := auth.NewKAgentTokenService(appName)
+	if err := tokenService.Start(context.Background()); err != nil {
+		logger.Error("failed to start token service", "error", err)
+	}
+	defer tokenService.Stop()
+	controllerClient, err := controllerclient.New(controllerclient.Config{
+		APIURL:        kagentAPIURL,
+		AgentName:     appName,
+		TokenProvider: tokenService,
 	})
 	if err != nil {
-		logger.Error("failed to create agent", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("create controller API client for %s: %w", kagentAPIURL, err)
+	}
+	defer func() {
+		if err := controllerClient.Close(); err != nil {
+			logger.Error("failed to close controller client", "error", err)
+		}
+	}()
+
+	sessionService, err := session.NewService(agentConfig.SessionDBURL)
+	if err != nil {
+		return fmt.Errorf("open session store %s: %w", agentConfig.SessionDBURL, err)
 	}
 
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        "grigri",
-			Agent:          reporter,
-			SessionService: adksession.InMemoryService(),
-		},
-	})
+	ctx := logging.IntoContext(context.Background(), logger)
+	runnerConfig, err := runnerpkg.CreateRunnerConfig(ctx, agentConfig, sessionService, appName, nil, controllerClient)
+	if err != nil {
+		return fmt.Errorf("create ADK runner config: %w", err)
+	}
+	grigriPlugin, err := newPlugin(logger)
+	if err != nil {
+		return fmt.Errorf("create grigri plugin: %w", err)
+	}
+	runnerConfig.PluginConfig.Plugins = append(runnerConfig.PluginConfig.Plugins, grigriPlugin)
 
+	stream := agentConfig.GetStream()
+	executor, err := a2a.NewKAgentExecutor(a2a.KAgentExecutorConfig{
+		RunnerConfig:   runnerConfig,
+		SessionService: sessionService,
+		Stream:         stream,
+		AppName:        appName,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("create A2A executor: %w", err)
+	}
+
+	agentCard.Capabilities.Streaming = stream
 	kagentApp, err := app.New(app.AppConfig{
-		AgentCard: card,
+		ControllerClient: controllerClient,
+		AgentCard:        *agentCard,
 		// Port left empty so pkg/app reads KAGENT_PORT (see kagent#2758).
-		Logger: logger,
-		Agent:  reporter,
+		AppName:         appName,
+		ShutdownTimeout: 5 * time.Second,
+		Logger:          logger,
+		Agent:           runnerConfig.Agent,
 	}, executor)
 	if err != nil {
-		logger.Error("failed to create app", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("create app: %w", err)
 	}
-
-	if err := kagentApp.Run(); err != nil {
-		logger.Error("server failed", "error", err)
-		os.Exit(1)
-	}
+	return kagentApp.Run()
 }
 
-// loadAgentConfig returns nil when kagent supplied no config (e.g. running
-// the binary by hand).
-func loadAgentConfig() (*adk.AgentConfig, error) {
-	raw := strings.TrimSpace(os.Getenv("KAGENT_CONFIG_JSON"))
-	if raw == "" {
-		return nil, nil
+// deriveAppName follows kagent's runtime: namespace__NS__name when both are
+// set, else the Agent Card name. The BYO compiler sets neither variable today.
+func deriveAppName(name, namespace, cardName string) string {
+	if name != "" && namespace != "" {
+		return strings.ReplaceAll(namespace, "-", "_") + "__NS__" + strings.ReplaceAll(name, "-", "_")
 	}
-	var cfg adk.AgentConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
-
-// loadAgentCard prefers the card kagent advertises and falls back to a minimal
-// one, so the binary also starts outside kagent.
-func loadAgentCard() (a2atype.AgentCard, error) {
-	card := a2atype.AgentCard{
-		Name:               "grigri",
-		Description:        "grigri BYO harness for kagent",
-		Version:            "0.0.0",
-		DefaultInputModes:  []string{"text/plain"},
-		DefaultOutputModes: []string{"text/plain"},
-	}
-	raw := strings.TrimSpace(os.Getenv("KAGENT_AGENT_CARD_JSON"))
-	if raw == "" {
-		return card, nil
-	}
-	err := json.Unmarshal([]byte(raw), &card)
-	return card, err
-}
-
-// envNames lists variable names only; values may hold credentials.
-func envNames() []string {
-	var names []string
-	for _, kv := range os.Environ() {
-		name, _, _ := strings.Cut(kv, "=")
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	return cmp.Or(cardName, "grigri")
 }

@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
@@ -52,23 +50,6 @@ func modelName(m adk.Model) string {
 	}
 	_ = json.Unmarshal(raw, &base)
 	return strings.TrimSpace(m.GetType() + " " + base.Model)
-}
-
-var placeholderPattern = regexp.MustCompile(`__KAGENT_ENV\[([A-Za-z0-9_]+)\]__`)
-
-// placeholderNames lists the environment variables that a compiled config
-// refers to as __KAGENT_ENV[NAME]__. Names only: values may be credentials.
-func placeholderNames(rawConfig string) []string {
-	seen := map[string]bool{}
-	var names []string
-	for _, m := range placeholderPattern.FindAllStringSubmatch(rawConfig, -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			names = append(names, m[1])
-		}
-	}
-	sort.Strings(names)
-	return names
 }
 
 func orNone(s string) string {
