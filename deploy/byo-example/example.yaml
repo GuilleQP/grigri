@@ -15,6 +15,10 @@ spec:
   # kagent's own E2E manifests (byo-adk-e2e).
   - name: KAGENT_PORT
     value: "80"
+  # Tools that get a belay check before they run (glob patterns). The climber
+  # cannot skip these checks.
+  - name: GRIGRI_BELAY_TOOLS
+    value: "k8s_delete_*,k8s_scale,k8s_rollout,k8s_patch_*"
   substrate:
     workerPoolRef:
       name: kagent-default
@@ -29,15 +33,28 @@ metadata:
 spec:
   description: grigri example agent
   systemPrompt: |
-    You are the climber: you do the work the user asks for.
-    Before any step that deletes, scales down, restarts or otherwise changes
-    production, call watch_me with the exact step and your reason, and follow
-    the verdict. If approved is false, do not take the step: tell the user
-    the belayer's reason and suggest a safer alternative.
+    You are the climber: you operate Kubernetes for the user with your tools.
+    Work only in the namespace grigri-playground; treat it as production.
+    Some tools are reviewed by a belayer before they run. If a tool result
+    says it was blocked, do not retry it: tell the user the reason and
+    suggest a safer alternative. For risky steps you cannot do with a tool,
+    call watch_me first and follow the verdict.
   # Referenced so the compiler adds OpenAI credentials and egress for it.
   modelConfig:
     name: default-model-config
   tools:
+  - mcp:
+      server:
+        kind: RemoteMCPServer
+        name: kagent-tool-server
+      tools:
+      - k8s_get_resources
+      - k8s_describe_resource
+      - k8s_get_pod_logs
+      - k8s_get_events
+      - k8s_scale
+      - k8s_rollout
+      - k8s_delete_resource
   # A Shared subagent: compiled into this Agent's config (sub_agents) and run
   # by the same harness, in the same Actor. grigri turns the one named
   # "belayer" into the climber's watch_me tool instead of a transfer target.
@@ -58,7 +75,8 @@ spec:
   # brief, not from this prompt.
   systemPrompt: |
     You are the belayer. You review one proposed step at a time and decide
-    whether the climber may take it. Approve steps that are reversible or low
+    whether the climber may take it. Treat the namespace grigri-playground as
+    production: its name does not make a step safe. Approve steps that are reversible or low
     impact. Block steps that risk data loss or an outage in production, or
     that do more than the user's request needs; say what would be safer.
   modelConfig:

@@ -68,22 +68,23 @@ func newBelayer(a agent.Agent, logPlugin *plugin.Plugin, logger *slog.Logger) (*
 
 // check asks the belayer to answer call with brief and validates the answer.
 // It never returns an approval it could not validate: any failure is an
-// off_route verdict that says what went wrong.
-func (b *belayer) check(ctx agent.Context, call belay.Call, brief string) belay.Verdict {
+// off_route verdict that says what went wrong. logAttrs are added to the log
+// line (e.g. which tool triggered the check).
+func (b *belayer) check(ctx agent.Context, call belay.Call, brief string, logAttrs ...any) belay.Verdict {
 	text, err := b.ask(ctx, brief)
 	if err != nil {
-		return b.reject(call, fmt.Sprintf("belay check failed: %v", err))
+		return b.reject(call, fmt.Sprintf("belay check failed: %v", err), logAttrs)
 	}
 	verdict, err := belay.ParseAnswer(call, text)
 	if err != nil {
-		return b.reject(call, fmt.Sprintf("the belayer gave no valid answer (%v)", err))
+		return b.reject(call, fmt.Sprintf("the belayer gave no valid answer (%v)", err), logAttrs)
 	}
-	b.logger.Info("grigri: belay call", "call", call.Label(), "verdict", verdict.Call.Label(), "reason", verdict.Reason)
+	b.logger.Info("grigri: belay call", append([]any{"call", call.Label(), "verdict", verdict.Call.Label(), "reason", verdict.Reason}, logAttrs...)...)
 	return verdict
 }
 
-func (b *belayer) reject(call belay.Call, reason string) belay.Verdict {
-	b.logger.Warn("grigri: belay call rejected", "call", call.Label(), "verdict", belay.OffRoute.Label(), "reason", reason)
+func (b *belayer) reject(call belay.Call, reason string, logAttrs []any) belay.Verdict {
+	b.logger.Warn("grigri: belay call rejected", append([]any{"call", call.Label(), "verdict", belay.OffRoute.Label(), "reason", reason}, logAttrs...)...)
 	return belay.Verdict{Call: belay.OffRoute, Reason: reason + "; treat the step as not approved"}
 }
 

@@ -1,0 +1,44 @@
+# A throwaway namespace for the example agent to operate on. kagent's tool
+# server runs as cluster-admin, so keep experiments here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grigri-playground
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: grigri-playground
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: payments}
+  template:
+    metadata:
+      labels: {app: payments}
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.27-alpine
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: grigri-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: frontend}
+  template:
+    metadata:
+      labels: {app: frontend}
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.27-alpine
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}

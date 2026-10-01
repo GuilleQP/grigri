@@ -161,11 +161,32 @@ User request: %s
 Proposed step: %s
 Climber's reason: %s
 
-Decide whether the climber may take this step. Reply with only this JSON object and nothing else:
+Decide whether the climber may take this step. %s`,
+		WatchMe.Spoken(), orUnknown(request), orUnknown(step), orUnknown(reason), answerFormat())
+}
+
+// ToolCallBrief is the brief for a rule-triggered belay check: the climber is
+// about to call a tool that the harness's rule marks as risky. The belayer
+// sees the exact call, not the climber's description of it.
+func ToolCallBrief(request, tool string, args map[string]any) string {
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		argsJSON = []byte(fmt.Sprintf("%v", args))
+	}
+	return fmt.Sprintf(`Belay check: the climber is about to call a tool that requires review.
+
+User request: %s
+Tool: %s
+Arguments: %s
+
+Decide whether this tool call may run. %s`,
+		orUnknown(request), tool, argsJSON, answerFormat())
+}
+
+func answerFormat() string {
+	return fmt.Sprintf(`Reply with only this JSON object and nothing else:
 {"call": "%s" or "%s", "reason": "<one or two sentences>"}
-Use %q to approve and %q to block.`,
-		WatchMe.Spoken(), orUnknown(request), orUnknown(step), orUnknown(reason),
-		ClimbOn, OffRoute, ClimbOn, OffRoute)
+Use %q to approve and %q to block.`, ClimbOn, OffRoute, ClimbOn, OffRoute)
 }
 
 func orUnknown(s string) string {

@@ -9,7 +9,8 @@
 //     (root) calls it through the watch_me tool, in an isolated session, and
 //     gets a validated belay call back (core/belay). Other sub-agents stay
 //     ADK sub-agents, as in kagent.
-//   - An ADK plugin on the runner sees every model and tool call.
+//   - An ADK plugin on the runner sees every model and tool call, and tools
+//     matching GRIGRI_BELAY_TOOLS get a belay check before they run.
 //
 // Not wired yet, compared with kagent's runtime: memory, telemetry export,
 // Agent Plugins (skills materialized from plugin packages) and STS token
@@ -32,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GuilleQP/grigri/core/belay"
 	"github.com/kagent-dev/kagent/go/adk/pkg/a2a"
 	kagentagent "github.com/kagent-dev/kagent/go/adk/pkg/agent"
 	"github.com/kagent-dev/kagent/go/adk/pkg/app"
@@ -50,6 +52,11 @@ import (
 
 // belayerName is the subagent binding name grigri treats as the belayer.
 const belayerName = "belayer"
+
+// belayToolsEnv lists the tools that need a belay check before they run:
+// comma-separated glob patterns, e.g. "k8s_delete_*,k8s_scale". Set it in the
+// Harness env. Empty means no rule-triggered checks.
+const belayToolsEnv = "GRIGRI_BELAY_TOOLS"
 
 func main() {
 	logger, err := logging.New(os.Stderr, cmp.Or(env.LogLevel.Get(), env.LogLevel.DefaultValue()))
@@ -114,7 +121,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create grigri plugin: %w", err)
 	}
-	runnerConfig, err := buildRunnerConfig(ctx, agentConfig, sessionService, appName, grigriPlugin, logger)
+	rule, err := belay.ParseToolRule(os.Getenv(belayToolsEnv))
+	if err != nil {
+		return fmt.Errorf("%s: %w", belayToolsEnv, err)
+	}
+	logger.Info("belay check rule", "tools", rule.String())
+	runnerConfig, err := buildRunnerConfig(ctx, agentConfig, sessionService, appName, rule, grigriPlugin, logger)
 	if err != nil {
 		return fmt.Errorf("create ADK runner config: %w", err)
 	}
@@ -149,8 +161,8 @@ func run(logger *slog.Logger) error {
 
 // buildRunnerConfig replaces kagent's runner.CreateRunnerConfig: same agent
 // builder and compaction, but the belayer becomes the watch_me tool instead of
-// a transfer target.
-func buildRunnerConfig(ctx context.Context, cfg *adk.AgentConfig, sessions adksession.Service, appName string, grigriPlugin *plugin.Plugin, logger *slog.Logger) (runner.Config, error) {
+// a transfer target, and tools matching rule get a belay check before they run.
+func buildRunnerConfig(ctx context.Context, cfg *adk.AgentConfig, sessions adksession.Service, appName string, rule belay.ToolRule, grigriPlugin *plugin.Plugin, logger *slog.Logger) (runner.Config, error) {
 	root := *cfg
 	root.SubAgents = nil
 	var belayerConfig *adk.AgentConfig
@@ -163,12 +175,13 @@ func buildRunnerConfig(ctx context.Context, cfg *adk.AgentConfig, sessions adkse
 	}
 
 	var extraTools []tool.Tool
+	var b *belayer
 	if belayerConfig != nil {
 		belayerAgent, err := kagentagent.CreateGoogleADKAgent(ctx, belayerConfig, belayerConfig.Name, nil)
 		if err != nil {
 			return runner.Config{}, fmt.Errorf("create belayer: %w", err)
 		}
-		b, err := newBelayer(belayerAgent, grigriPlugin, logger)
+		b, err = newBelayer(belayerAgent, grigriPlugin, logger)
 		if err != nil {
 			return runner.Config{}, fmt.Errorf("create belay runner: %w", err)
 		}
@@ -189,11 +202,19 @@ func buildRunnerConfig(ctx context.Context, cfg *adk.AgentConfig, sessions adkse
 	if err != nil {
 		return runner.Config{}, fmt.Errorf("configure context compaction: %w", err)
 	}
+	plugins := []*plugin.Plugin{grigriPlugin}
+	if !rule.Empty() {
+		checks, err := newBelayCheckPlugin(rule, b, logger)
+		if err != nil {
+			return runner.Config{}, fmt.Errorf("create belay check plugin: %w", err)
+		}
+		plugins = append(plugins, checks)
+	}
 	return runner.Config{
 		AppName:        appName,
 		Agent:          rootAgent,
 		SessionService: sessions,
-		PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{grigriPlugin}},
+		PluginConfig:   runner.PluginConfig{Plugins: plugins},
 		Compaction:     compaction,
 	}, nil
 }

@@ -27,6 +27,8 @@ digest:
 
 deploy: push
 	IMAGE=$$($(MAKE) -s digest) envsubst '$${IMAGE}' < deploy/byo-example/example.yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) apply -f deploy/byo-example/playground.yaml
 
 undeploy:
 	$(KUBECTL) delete -f deploy/byo-example/example.yaml --ignore-not-found
+	$(KUBECTL) delete -f deploy/byo-example/playground.yaml --ignore-not-found
